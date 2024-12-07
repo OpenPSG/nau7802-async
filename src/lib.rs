@@ -87,31 +87,32 @@ where
     /// i2c_dev: The I2C device.
     /// drdy_pin: The data ready pin. If not used, set to `None`.
     /// delay: The delay provider.
+    /// gain: The instrumentation amplifier gain.
+    /// sample_rate: The ADC sample rate.
+    /// ldo_voltage: Optional internal LDO voltage.
     ///
-    pub fn new(i2c_dev: D, drdy_pin: Option<DRDY>, delay: DELAY) -> Self {
-        Self {
-            i2c_dev,
-            drdy_pin,
-            delay,
-        }
-    }
-
-    /// Initializes the NAU7802 device.
-    pub async fn init(
-        &mut self,
+    pub async fn try_new(
+        i2c_dev: D,
+        drdy_pin: Option<DRDY>,
+        delay: DELAY,
         gain: Gain,
         sample_rate: SamplesPerSecond,
         ldo_voltage: Option<Voltage>,
-    ) -> Result<(), Error<I2cErr, PinErr>> {
-        self.reset().await?;
-        self.power_up().await?;
-        self.set_gain(gain).await?;
-        self.set_sample_rate(sample_rate).await?;
+    ) -> Result<Self, Error<I2cErr, PinErr>> {
+        let mut adc = Self {
+            i2c_dev,
+            drdy_pin,
+            delay,
+        };
+        adc.reset().await?;
+        adc.power_up().await?;
+        adc.set_gain(gain).await?;
+        adc.set_sample_rate(sample_rate).await?;
         if let Some(ldo_voltage) = ldo_voltage {
-            self.set_ldo_voltage(ldo_voltage).await?;
+            adc.set_ldo_voltage(ldo_voltage).await?;
         }
-        self.calibrate().await?;
-        Ok(())
+        adc.calibrate().await?;
+        Ok(adc)
     }
 
     /// Reads the next ADC sample.
@@ -306,10 +307,10 @@ mod tests {
         digital::{Mock as MockPin, State as PinState, Transaction as PinTransaction},
         i2c::{Mock as MockI2c, Transaction as I2cTransaction},
     };
+    use std::sync::LazyLock;
 
-    #[tokio::test]
-    async fn test_init() {
-        let i2c_expectations = [
+    static I2C_SETUP_EXPECTATIONS: LazyLock<Vec<I2cTransaction>> = LazyLock::new(|| {
+        vec![
             // Reset sequence.
             // Set RR bit.
             I2cTransaction::write_read(
@@ -410,30 +411,39 @@ mod tests {
                 vec![Register::Ctrl2 as u8],
                 vec![0x00],
             ),
-        ];
-        let mut mock_i2c = MockI2c::new(&i2c_expectations);
+        ]
+    });
 
-        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
-            Nau7802::new(mock_i2c.clone(), None, NoopDelay);
+    #[tokio::test]
+    async fn test_try_new() {
+        let mut mock_i2c = MockI2c::new(&*I2C_SETUP_EXPECTATIONS);
 
-        assert!(driver
-            .init(Gain::G128, SamplesPerSecond::SPS10, Some(Voltage::L3v3))
+        let _driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
+            Nau7802::try_new(
+                mock_i2c.clone(),
+                None,
+                NoopDelay,
+                Gain::G128,
+                SamplesPerSecond::SPS10,
+                Some(Voltage::L3v3),
+            )
             .await
-            .is_ok());
+            .unwrap();
 
         mock_i2c.done();
     }
 
     #[tokio::test]
     async fn test_read_with_interrupt() {
-        let i2c_expectations = [
-            // Read ADC value.
-            I2cTransaction::write_read(
-                DEFAULT_DEVICE_ADDRESS,
-                vec![Register::AdcoB2 as u8],
-                vec![0x1E, 0x84, 0x00],
-            ),
-        ];
+        let mut i2c_expectations: Vec<I2cTransaction> = vec![];
+        i2c_expectations.extend_from_slice(&*I2C_SETUP_EXPECTATIONS);
+
+        // Read ADC value.
+        i2c_expectations.push(I2cTransaction::write_read(
+            DEFAULT_DEVICE_ADDRESS,
+            vec![Register::AdcoB2 as u8],
+            vec![0x1E, 0x84, 0x00],
+        ));
 
         let pin_expectations = [
             // Wait for DRDY.
@@ -444,7 +454,16 @@ mod tests {
         let mut mock_pin = MockPin::new(&pin_expectations);
 
         let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
-            Nau7802::new(mock_i2c.clone(), Some(mock_pin.clone()), NoopDelay);
+            Nau7802::try_new(
+                mock_i2c.clone(),
+                Some(mock_pin.clone()),
+                NoopDelay,
+                Gain::G128,
+                SamplesPerSecond::SPS10,
+                Some(Voltage::L3v3),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(driver.read().await.unwrap(), 1_999_872);
 
@@ -454,40 +473,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_without_interrupt() {
-        let i2c_expectations = [
-            // Wait for DRDY.
-            I2cTransaction::write_read(
+        let mut i2c_expectations: Vec<I2cTransaction> = vec![];
+        i2c_expectations.extend_from_slice(&*I2C_SETUP_EXPECTATIONS);
+
+        // Wait for DRDY.
+        for _ in 0..3 {
+            i2c_expectations.push(I2cTransaction::write_read(
                 DEFAULT_DEVICE_ADDRESS,
                 vec![Register::PuCtrl as u8],
                 vec![0b1110],
-            ),
-            I2cTransaction::write_read(
-                DEFAULT_DEVICE_ADDRESS,
-                vec![Register::PuCtrl as u8],
-                vec![0b1110],
-            ),
-            I2cTransaction::write_read(
-                DEFAULT_DEVICE_ADDRESS,
-                vec![Register::PuCtrl as u8],
-                vec![0b1110],
-            ),
-            I2cTransaction::write_read(
-                DEFAULT_DEVICE_ADDRESS,
-                vec![Register::PuCtrl as u8],
-                vec![0b1110 | PuCtrl::CR.mask()],
-            ),
-            // Read ADC value.
-            I2cTransaction::write_read(
-                DEFAULT_DEVICE_ADDRESS,
-                vec![Register::AdcoB2 as u8],
-                vec![0x1E, 0x84, 0x00],
-            ),
-        ];
+            ));
+        }
+
+        // Set DRDY.
+        i2c_expectations.push(I2cTransaction::write_read(
+            DEFAULT_DEVICE_ADDRESS,
+            vec![Register::PuCtrl as u8],
+            vec![0b1110 | PuCtrl::CR.mask()],
+        ));
+
+        // Read ADC value.
+        i2c_expectations.push(I2cTransaction::write_read(
+            DEFAULT_DEVICE_ADDRESS,
+            vec![Register::AdcoB2 as u8],
+            vec![0x1E, 0x84, 0x00],
+        ));
 
         let mut mock_i2c = MockI2c::new(&i2c_expectations);
 
         let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
-            Nau7802::new(mock_i2c.clone(), None, NoopDelay);
+            Nau7802::try_new(
+                mock_i2c.clone(),
+                None,
+                NoopDelay,
+                Gain::G128,
+                SamplesPerSecond::SPS10,
+                Some(Voltage::L3v3),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(driver.read().await.unwrap(), 1_999_872);
 
