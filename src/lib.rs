@@ -300,9 +300,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use embassy_time::Delay;
     use embedded_hal_mock::common::Generic;
     use embedded_hal_mock::eh1::{
+        delay::NoopDelay,
         digital::{Mock as MockPin, State as PinState, Transaction as PinTransaction},
         i2c::{Mock as MockI2c, Transaction as I2cTransaction},
     };
@@ -413,8 +413,8 @@ mod tests {
         ];
         let mut mock_i2c = MockI2c::new(&i2c_expectations);
 
-        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, Delay> =
-            Nau7802::new(mock_i2c.clone(), None, Delay);
+        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
+            Nau7802::new(mock_i2c.clone(), None, NoopDelay);
 
         assert!(driver
             .init(Gain::G128, SamplesPerSecond::SPS10, Some(Voltage::L3v3))
@@ -443,8 +443,8 @@ mod tests {
         let mut mock_i2c = MockI2c::new(&i2c_expectations);
         let mut mock_pin = MockPin::new(&pin_expectations);
 
-        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, Delay> =
-            Nau7802::new(mock_i2c.clone(), Some(mock_pin.clone()), Delay);
+        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
+            Nau7802::new(mock_i2c.clone(), Some(mock_pin.clone()), NoopDelay);
 
         assert_eq!(driver.read().await.unwrap(), 1_999_872);
 
@@ -486,8 +486,8 @@ mod tests {
 
         let mut mock_i2c = MockI2c::new(&i2c_expectations);
 
-        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, Delay> =
-            Nau7802::new(mock_i2c.clone(), None, Delay);
+        let mut driver: Nau7802<Generic<I2cTransaction>, Generic<PinTransaction>, NoopDelay> =
+            Nau7802::new(mock_i2c.clone(), None, NoopDelay);
 
         assert_eq!(driver.read().await.unwrap(), 1_999_872);
 
